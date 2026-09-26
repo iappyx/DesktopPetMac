@@ -1,0 +1,7 @@
+.build/
+DesktopPet.app/
+*.xcodeproj
+.swiftpm/
+Resources/DesktopPet.icns
+Resources/icon-preview.png
+.DS_Store
