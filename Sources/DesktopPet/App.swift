@@ -44,6 +44,7 @@ final class PetManager: NSObject {
                 self.indexFailed = true
             } else {
                 self.indexFailed = false
+                self.catalog.fetchMissingTitles { [weak self] in self?.rebuildMenu() }
             }
             self.rebuildMenu()
             completion?()
@@ -52,7 +53,7 @@ final class PetManager: NSObject {
 
     /// Loads a pet from the catalog (downloading it if needed) and adds one instance of it.
     func selectPet(_ folder: String, onFailure: ((Error) -> Void)? = nil) {
-        status = "Downloading \(folder)…"
+        status = "Downloading \(catalog.displayName(folder))…"
         rebuildMenu()
         catalog.fetchPet(folder) { [weak self] result in
             guard let self = self else { return }
@@ -166,8 +167,11 @@ final class PetManager: NSObject {
             mi.isEnabled = false
             petsMenu.addItem(mi)
         }
-        for e in catalog.entries {
-            let mi = NSMenuItem(title: e.folder, action: #selector(menuSelectPet(_:)), keyEquivalent: "")
+        let sorted = catalog.entries.sorted {
+            catalog.displayName($0.folder).localizedCaseInsensitiveCompare(catalog.displayName($1.folder)) == .orderedAscending
+        }
+        for e in sorted {
+            let mi = NSMenuItem(title: catalog.displayName(e.folder), action: #selector(menuSelectPet(_:)), keyEquivalent: "")
             mi.target = self
             mi.representedObject = e.folder
             mi.state = (e.folder == currentPetFolder) ? .on : .off

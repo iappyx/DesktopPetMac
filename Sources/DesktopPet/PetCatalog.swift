@@ -12,6 +12,11 @@ final class PetCatalog {
     private struct Index: Codable {
         let pets: [Entry]
     }
+    /// A pet's <title>, remembered with the lastupdate it was read from.
+    private struct CachedTitle: Codable {
+        let title: String
+        let lastupdate: String
+    }
 
     enum CatalogError: LocalizedError {
         case badFolderName(String)
@@ -31,6 +36,7 @@ final class PetCatalog {
 
     let cacheRoot: URL
     private(set) var entries: [Entry] = []
+    private var titles: [String: CachedTitle] = [:]
     private let session: URLSession
 
     init() {
@@ -46,9 +52,73 @@ final class PetCatalog {
         if let data = try? Data(contentsOf: indexURL), let index = try? JSONDecoder().decode(Index.self, from: data) {
             entries = Self.valid(index.pets)
         }
+        if let data = try? Data(contentsOf: titlesURL),
+           let cached = try? JSONDecoder().decode([String: CachedTitle].self, from: data) {
+            titles = cached
+        }
     }
 
     private var indexURL: URL { cacheRoot.appendingPathComponent("pets.json") }
+    private var titlesURL: URL { cacheRoot.appendingPathComponent("titles.json") }
+
+    // MARK: - Display names
+
+    /// Menu name: the pet's title from its animations.xml, or a tidied folder name until that is known.
+    func displayName(_ folder: String) -> String {
+        let raw = titles[folder]?.title
+            ?? folder.replacingOccurrences(of: "_", with: " ").replacingOccurrences(of: "-", with: " ")
+        return Self.capitalizeLowercaseWords(raw)
+    }
+
+    /// "fox mate" -> "Fox Mate", but leaves "gSheep Blue", "eSheep 64bit" and "SSJ Goku" alone.
+    static func capitalizeLowercaseWords(_ s: String) -> String {
+        return s.split(separator: " ").map { word -> String in
+            word.allSatisfy { $0.isLowercase } ? word.prefix(1).uppercased() + word.dropFirst() : String(word)
+        }.joined(separator: " ")
+    }
+
+    /// Reads <title> from the start of an animations.xml (the header comes before the large image data).
+    static func extractTitle(_ data: Data) -> String? {
+        let text = String(decoding: data, as: UTF8.self)
+        guard let open = text.range(of: "<title>"),
+              let close = text.range(of: "</title>", range: open.upperBound..<text.endIndex) else { return nil }
+        let title = String(text[open.upperBound..<close.lowerBound])
+            .replacingOccurrences(of: "&lt;", with: "<").replacingOccurrences(of: "&gt;", with: ">")
+            .replacingOccurrences(of: "&quot;", with: "\"").replacingOccurrences(of: "&apos;", with: "'")
+            .replacingOccurrences(of: "&amp;", with: "&")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return title.isEmpty ? nil : title
+    }
+
+    private func saveTitles() {
+        guard let data = try? JSONEncoder().encode(titles) else { return }
+        try? FileManager.default.createDirectory(at: cacheRoot, withIntermediateDirectories: true)
+        try? data.write(to: titlesURL, options: .atomic)
+    }
+
+    /// Fetches the titles that are missing or outdated. Only the first 4 KB of each animations.xml is
+    /// requested (HTTP range), instead of the whole file with its sprite sheet. Completion runs on main.
+    func fetchMissingTitles(completion: @escaping () -> Void) {
+        let missing = entries.filter { titles[$0.folder]?.lastupdate != $0.lastupdate }
+        guard !missing.isEmpty else { completion(); return }
+        let group = DispatchGroup()
+        for e in missing {
+            group.enter()
+            var request = URLRequest(url: Self.baseURL.appendingPathComponent(e.folder).appendingPathComponent("animations.xml"))
+            request.setValue("bytes=0-4095", forHTTPHeaderField: "Range")
+            session.dataTask(with: request) { data, _, _ in
+                let title = data.flatMap(Self.extractTitle)
+                DispatchQueue.main.async {
+                    if let t = title { self.titles[e.folder] = CachedTitle(title: t, lastupdate: e.lastupdate) }
+                    group.leave()
+                }
+            }.resume()
+        }
+        group.notify(queue: .main) { [weak self] in
+            self?.saveTitles()
+            completion()
+        }
+    }
 
     /// Folder names come from the network and become path components, so allow only plain names.
     static func isValidFolder(_ name: String) -> Bool {
@@ -126,13 +196,17 @@ final class PetCatalog {
             guard let self = self else { return }
             do {
                 let data = try result.get()
-                _ = try PetXML.load(data: data)           // only cache files that actually parse
+                let def = try PetXML.load(data: data)     // only cache files that actually parse
                 let dir = self.folderURL(folder)
                 try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
                 let xml = dir.appendingPathComponent("animations.xml")
                 try data.write(to: xml, options: .atomic)
                 if let e = self.entry(folder) {
                     try e.lastupdate.write(to: dir.appendingPathComponent("lastupdate"), atomically: true, encoding: .utf8)
+                    if !def.title.isEmpty {
+                        self.titles[folder] = CachedTitle(title: def.title, lastupdate: e.lastupdate)
+                        self.saveTitles()
+                    }
                 }
                 completion(.success(xml))
             } catch {
