@@ -28,8 +28,8 @@ final class PetWindow: NSWindow {
     private var offsetY = 0.0
     private var positionX = 0.0
     private var positionY = 0.0
-    private var prevPositionX = 0.0
-    private var prevPositionY = 0.0
+    private var dragAnchor = CGPoint.zero
+    private var dragVelocity = DragVelocity()
     private var tossForce = CGVector.zero
     private var tossVertVel = 0.0
     private var displayIndex = 0
@@ -41,8 +41,18 @@ final class PetWindow: NSWindow {
     private var parentY = -1
     private var parentFlipped = false
     private var children: [PetWindow] = []
+    var childPets: [PetWindow] { children }
 
     private var timer: Timer?
+
+    // Smooth presentation (upstream #161): the engine moves positionX/Y once per animation frame; the window
+    // glides between those positions on a separate ~60 Hz timer. Tossing and window following run there too.
+    private var motion = MotionTrack()
+    private var motionTimer: Timer?
+    private var tossUpdatedAt = 0.0
+    private var lastFollowCheck = 0.0
+    private var lastWindowMove = -1000.0
+    private static func now() -> Double { CACurrentMediaTime() * 1000 }
     private let spriteLayer = CALayer()
     private let petView: PetView
 
@@ -207,6 +217,23 @@ final class PetWindow: NSWindow {
         if pet.animationSync > 1 { setNewAnimation(pet.animationSync) }
     }
 
+    /// Called when displays are added, removed or rearranged (port of upstream RecoverDisplayLayout, #161):
+    /// re-resolve the display index and bring a pet that ended up off-screen back onto the desktop.
+    func recoverDisplayLayout() {
+        guard !closed else { return }
+        let frame = CGRect(x: positionX, y: positionY + offsetY, width: petWidth, height: petHeight)
+        displayIndex = DesktopGeometry.nearestScreenIndex(to: frame)
+        let area = screenArea
+        if isDragging || frame.intersects(area) { return }
+        currentWindow = nil
+        isLeaving = false
+        let x = min(max(frame.minX, area.minX), area.maxX - petWidth)
+        let y = min(max(frame.minY, area.minY), area.maxY - petHeight)
+        positionX = x
+        positionY = y - offsetY
+        applyPosition()
+    }
+
     func setScale(_ s: Int) {
         scale = max(1, s)
         let w = petWidth, h = petHeight
@@ -221,6 +248,7 @@ final class PetWindow: NSWindow {
         if closed { return }
         closed = true
         stopTimer()
+        stopMotionTimer()
         for c in children { c.closePet() }
         children.removeAll()
         orderOut(nil)
@@ -264,6 +292,7 @@ final class PetWindow: NSWindow {
         animationStep = -1
         current = pet.animation(id)
         current.updateValues(context())
+        pet.startSound(id)
 
         // Child pets spawned by this animation (max 5 levels deep).
         if let infos = pet.children[id], childDepth < 5 {
@@ -299,9 +328,103 @@ final class PetWindow: NSWindow {
         updateFlip()
     }
 
+    /// Places the window at the engine position immediately (spawn, drag, resize, recovery).
     private func applyPosition() {
-        let r = CGRect(x: positionX, y: positionY + offsetY, width: petWidth, height: petHeight)
-        setFrame(DesktopGeometry.appKit(r), display: true)
+        motion.reset(CGPoint(x: positionX, y: positionY + offsetY), now: Self.now())
+        render(Self.now())
+    }
+
+    /// Glides the window to the engine position over `ms` milliseconds (one animation step).
+    private func queueMotion(_ ms: Int) {
+        let now = Self.now()
+        if !motion.initialized { motion.reset(CGPoint(x: frame.minX, y: DesktopGeometry.topLeft(frame).minY), now: now) }
+        motion.move(to: CGPoint(x: positionX, y: positionY + offsetY), now: now, milliseconds: Double(ms))
+        startMotionTimer()
+    }
+
+    private func render(_ now: Double) {
+        let p = motion.sample(now)
+        let r = CGRect(x: p.x.rounded(), y: p.y.rounded(), width: petWidth, height: petHeight)
+        let target = DesktopGeometry.appKit(r)
+        if frame != target { setFrame(target, display: false) }
+    }
+
+    private func startMotionTimer() {
+        guard motionTimer == nil, !closed else { return }
+        let t = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in self?.motionTick() }
+        RunLoop.main.add(t, forMode: .common)
+        motionTimer = t
+    }
+
+    private func stopMotionTimer() {
+        motionTimer?.invalidate()
+        motionTimer = nil
+    }
+
+    private func motionTick() {
+        guard !closed else { stopMotionTimer(); return }
+        let now = Self.now()
+        if isDragging { return }                  // drag positions come from mouse events
+        if isTossing {
+            advanceToss(now)
+        } else {
+            if currentWindow != nil && !isLeaving { followWindowIfMoved(now) }
+            render(now)
+        }
+        // Keep running while gliding, flying, or standing on a window that might move.
+        if !isTossing && !motion.isMoving(now) && currentWindow == nil { stopMotionTimer() }
+    }
+
+    /// Tracks the window the pet stands on. Polls fast while it is moving, slowly while it is still.
+    private func followWindowIfMoved(_ now: Double) {
+        let interval = now - lastWindowMove < 500 ? 0.0 : 100.0
+        guard now - lastFollowCheck >= interval, let w = currentWindow else { return }
+        lastFollowCheck = now
+        guard let rct = DesktopGeometry.frame(ofWindow: w.id) else { return }   // gone: nextStep handles it
+        if rct != currentWindowFrame {
+            followWindow(newFrame: rct)
+            lastWindowMove = now
+        }
+    }
+
+    /// Time-based toss physics (port of upstream AdvanceToss, #161). Force units stay "pixels per 30 ms";
+    /// pauses are capped at 50 ms so a stalled UI cannot teleport the pet.
+    private func advanceToss(_ now: Double) {
+        let dt = max(0, min(50, now - tossUpdatedAt)) / 30.0
+        tossUpdatedAt = now
+        if dt == 0 { return }
+        let area = screenArea
+        var nextX = positionX + Double(tossForce.dx) * dt
+        let left = Double(area.minX), right = Double(area.maxX) - petWidth
+        if nextX < left || nextX > right {
+            // Bounce, and use up the remaining travel instead of pausing a frame.
+            let edge = nextX < left ? left : right
+            nextX = edge - (nextX - edge) * 0.3
+            tossForce.dx *= -0.3
+        }
+        positionX = max(left, min(right, nextX))
+        let dy = tossVertVel * dt + 0.75 * dt * dt
+        tossVertVel += 1.5 * dt
+        var ground = floorY()
+        var land = positionY + dy >= ground
+        let windowTop = dy > 0 ? fallDetect(Int(dy.rounded(.up))) : -1
+        if windowTop != -1 && Double(windowTop) - petHeight <= ground {
+            ground = Double(windowTop) - petHeight
+            land = true
+        } else {
+            currentWindow = nil
+        }
+        positionY = land ? ground : positionY + dy
+        offsetY = 0
+        applyPosition()
+        if land {
+            if (tossForce.dx < 0 && !isMovingLeft) || (tossForce.dx > 0 && isMovingLeft) {
+                flipImages()
+            }
+            isTossing = false
+            setNewAnimation(tossVertVel < 40 ? pet.animationFallSoft : pet.animationFallHard)
+            showFrame(index: 0)
+        }
     }
 
     /// Port of CheckFullScreen(): drop below a full-screen window instead of covering it.
@@ -334,52 +457,20 @@ final class PetWindow: NSWindow {
             intervalMs = current.start.interval.value +
                 ((current.end.interval.value - current.start.interval.value) * animationStep / total)
         }
+        let movementDuration = intervalMs
         alphaValue = CGFloat(current.start.opacity + (current.end.opacity - current.start.opacity) * Double(animationStep) / Double(total))
         offsetY = Double(current.start.offsetY + ((current.end.offsetY - current.start.offsetY) * animationStep / total))
 
-        // Dragging: follow the mouse.
+        // Dragging: the position follows mouse events (petMouseDragged), not animation frames.
         if isDragging {
-            prevPositionX = positionX
-            prevPositionY = positionY
-            let m = DesktopGeometry.mouseLocation
-            positionX = Double(m.x) - petWidth / 2
-            positionY = Double(m.y) - 2
-            applyPosition()
+            offsetY = 0
             return
         }
 
         let area = screenArea
 
-        // Toss physics.
-        if isTossing {
-            let hittingLeft = positionX + Double(tossForce.dx) <= Double(area.minX)
-            let hittingRight = positionX + Double(tossForce.dx) >= Double(area.maxX) - petWidth
-            let hittingTaskbar = positionY + tossVertVel >= floorY(dx: Double(tossForce.dx))
-            let windowTop = fallDetect(Int(tossVertVel))
-
-            if hittingLeft || hittingRight {
-                tossForce.dx = -tossForce.dx * 0.3
-                positionX = hittingLeft ? Double(area.minX) : Double(area.maxX) - petWidth
-                applyPosition()
-                return
-            }
-            if hittingTaskbar || windowTop > 0 {
-                positionY = hittingTaskbar ? floorY(dx: Double(tossForce.dx)) : Double(windowTop) - petHeight
-                if (tossForce.dx < 0 && !isMovingLeft) || (tossForce.dx > 0 && isMovingLeft) {
-                    flipImages()
-                }
-                setNewAnimation(tossVertVel < 40 ? pet.animationFallSoft : pet.animationFallHard)
-                showFrame(index: 0)
-                isTossing = false
-                applyPosition()
-                return
-            }
-            positionX = (positionX + Double(tossForce.dx)).rounded(.towardZero)
-            positionY = (positionY + tossVertVel).rounded(.towardZero)
-            tossVertVel += 1.5
-            applyPosition()
-            return
-        }
+        // Toss physics run on the motion timer (advanceToss), not on animation frames.
+        if isTossing { return }
 
         var x = Double(current.start.x.value)
         var y = Double(current.start.y.value)
@@ -548,15 +639,8 @@ final class PetWindow: NSWindow {
             } else if animationStep > 0 {
                 if let rct = DesktopGeometry.frame(ofWindow: currentWindow!.id) {
                     if rct != currentWindowFrame {
-                        // The window we stand on moved or resized: follow it.
-                        if current.start.x.value != 0 || abs(x) > 0 {
-                            followWindow(newFrame: rct)
-                            applyPosition()
-                            return
-                        }
-                        currentWindow = nil
-                        setNewAnimation(pet.nextGravityAnimation(current.id, where: .window))
-                        newAnimation = true
+                        // The window we stand on moved or resized: follow it (usually the motion timer already did).
+                        followWindow(newFrame: rct)
                     } else if DesktopGeometry.isTopEdgeCovered(of: currentWindow!, atX: positionX, width: petWidth) {
                         currentWindow = nil
                         setNewAnimation(pet.nextGravityAnimation(current.id, where: .window))
@@ -579,7 +663,7 @@ final class PetWindow: NSWindow {
         positionX += x
         positionY += y
         isLeaving = leavingScreen
-        applyPosition()
+        queueMotion(movementDuration)
     }
 
     // MARK: - Window interaction (ports of FallDetect / FollowWindow)
@@ -606,13 +690,17 @@ final class PetWindow: NSWindow {
 
     private func followWindow(newFrame rct: CGRect) {
         let old = currentWindowFrame
-        positionY -= Double(old.minY - rct.minY)
-        if rct.width == old.width || old.width == 0 {
-            positionX -= Double(old.minX - rct.minX)
-        } else {
-            positionX = Double(rct.minX) + (positionX - Double(old.minX)) * Double(rct.width) / Double(old.width)
-        }
+        let ratio = old.width > 0 ? Double(rct.width / old.width) : 1
+        let dy = Double(rct.minY - old.minY)
+        positionX = Double(rct.minX) + (positionX - Double(old.minX)) * ratio
+        positionY += dy
+        motion.follow(oldLeft: Double(old.minX), newLeft: Double(rct.minX), ratio: ratio, dy: dy)
+        render(Self.now())
         currentWindowFrame = rct
+        if let w = currentWindow {
+            currentWindow = DesktopGeometry.DesktopWindow(id: w.id, ownerPID: w.ownerPID, ownerName: w.ownerName,
+                                                          title: w.title, frame: rct)
+        }
     }
 
     // MARK: - Mouse (called by PetView)
@@ -622,29 +710,43 @@ final class PetWindow: NSWindow {
         currentWindow = nil
         isDragging = true
         isTossing = false
+        // Keep the exact grab point, like dragging a normal window (upstream #161).
+        positionY += offsetY
+        offsetY = 0
+        let m = DesktopGeometry.mouseLocation
+        dragAnchor = CGPoint(x: Double(m.x) - positionX, y: Double(m.y) - positionY)
+        dragVelocity.reset(x: positionX, y: positionY, at: event.timestamp)
         setNewAnimation(pet.animationDrag)
         orderFrontRegardless()
     }
 
     func petMouseDragged(_ event: NSEvent) {
         guard isDragging else { return }
+        updateDragPosition(at: event.timestamp)
+    }
+
+    private func updateDragPosition(at time: TimeInterval) {
         let m = DesktopGeometry.mouseLocation
-        let r = CGRect(x: Double(m.x) - petWidth / 2, y: Double(m.y) - 2 + offsetY, width: petWidth, height: petHeight)
-        setFrame(DesktopGeometry.appKit(r), display: true)
+        positionX = Double(m.x - dragAnchor.x)
+        positionY = Double(m.y - dragAnchor.y)
+        offsetY = 0
+        dragVelocity.add(x: positionX, y: positionY, at: time)
+        applyPosition()
     }
 
     func petMouseUp(_ event: NSEvent) {
         guard !isChild, isDragging else { return }
-        let ms = Double(max(1, intervalMs))
-        let fx = (positionX - prevPositionX) / ms * 10
-        let fy = (positionY - prevPositionY) / ms * 10
-        tossForce = CGVector(dx: CGFloat(fx), dy: CGFloat(fy))
+        updateDragPosition(at: event.timestamp)
+        tossForce = dragVelocity.tossForce(at: event.timestamp)
+        let fx = Double(tossForce.dx), fy = Double(tossForce.dy)
         let length = (fx * fx + fy * fy).squareRoot()
         if length > 5 {
             if pet.animationToss != -1 { setNewAnimation(pet.animationToss) }
             isTossing = true
             tossVertVel = Double(tossForce.dy)
+            tossUpdatedAt = Self.now()
             intervalMs = 30
+            startMotionTimer()
         } else {
             setNewAnimation(pet.animationFall)
         }
@@ -714,4 +816,66 @@ final class PetView: NSView {
     override func mouseDragged(with event: NSEvent) { owner?.petMouseDragged(event) }
     override func mouseUp(with event: NSEvent) { owner?.petMouseUp(event) }
     override func rightMouseDown(with event: NSEvent) { owner?.petRightClick(event) }
+}
+
+/// Release velocity from recent timestamped drag samples (port of upstream DragVelocity, #161).
+/// Force units match the original: pixels per millisecond × 10.
+struct DragVelocity {
+    private var samples: [(time: Double, x: Double, y: Double)] = []
+
+    mutating func reset(x: Double, y: Double, at seconds: TimeInterval) {
+        samples.removeAll()
+        add(x: x, y: y, at: seconds)
+    }
+
+    mutating func add(x: Double, y: Double, at seconds: TimeInterval) {
+        let now = seconds * 1000
+        if let last = samples.last, now <= last.time { return }
+        samples.append((now, x, y))
+        while samples.count > 2 && samples[1].time <= now - 80 { samples.removeFirst() }
+    }
+
+    func tossForce(at seconds: TimeInterval) -> CGVector {
+        let now = seconds * 1000
+        guard samples.count >= 2, let first = samples.first, let last = samples.last else { return .zero }
+        let elapsed = last.time - first.time
+        // Too short to measure, or the mouse stopped before release: no toss.
+        if elapsed < 8 || now - last.time > 80 { return .zero }
+        return CGVector(dx: (last.x - first.x) / elapsed * 10, dy: (last.y - first.y) / elapsed * 10)
+    }
+}
+
+/// Interpolates the window position between engine positions (port of upstream MotionTrack, #161).
+/// Coordinates are global top-left; times are milliseconds.
+struct MotionTrack {
+    private var from = CGPoint.zero, to = CGPoint.zero
+    private var started = 0.0, duration = 0.0
+    private(set) var initialized = false
+
+    mutating func reset(_ p: CGPoint, now: Double) {
+        from = p; to = p
+        started = now; duration = 0; initialized = true
+    }
+
+    func sample(_ now: Double) -> CGPoint {
+        let t = duration <= 0 ? 1 : max(0, min(1, (now - started) / duration))
+        return CGPoint(x: from.x + (to.x - from.x) * t, y: from.y + (to.y - from.y) * t)
+    }
+
+    mutating func move(to p: CGPoint, now: Double, milliseconds: Double) {
+        guard initialized else { reset(p, now: now); return }
+        from = sample(now); to = p
+        started = now; duration = max(1, milliseconds)
+    }
+
+    func isMoving(_ now: Double) -> Bool {
+        return initialized && now < started + duration && from != to
+    }
+
+    /// Shifts the whole glide along with the window the pet stands on.
+    mutating func follow(oldLeft: Double, newLeft: Double, ratio: Double, dy: Double) {
+        from.x = newLeft + (from.x - oldLeft) * ratio
+        to.x = newLeft + (to.x - oldLeft) * ratio
+        from.y += dy; to.y += dy
+    }
 }

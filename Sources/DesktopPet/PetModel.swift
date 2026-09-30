@@ -175,10 +175,15 @@ final class PetDefinition {
             sum += n.probability
             if sum >= r { chosen = n.id; break }
         }
-        if chosen > 0, let snd = sounds[chosen], Int.random(in: 0..<100) < snd.probability {
+        return chosen
+    }
+
+    /// Plays the sound attached to an animation, if any, with its probability (C# Animations.StartSound).
+    /// Called whenever an animation starts, so key animations (drag, fall, toss, …) get their sounds too.
+    func startSound(_ id: Int) {
+        if let snd = sounds[id], Int.random(in: 0..<100) < snd.probability {
             SoundPlayer.shared.play(snd)
         }
-        return chosen
     }
 
     func nextBorderAnimation(_ id: Int, where place: PetOnly) -> Int {

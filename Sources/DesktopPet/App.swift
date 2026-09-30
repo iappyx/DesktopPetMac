@@ -122,6 +122,17 @@ final class PetManager: NSObject {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         statusItem = item
         rebuildMenu()
+        NotificationCenter.default.addObserver(self, selector: #selector(screensChanged),
+                                               name: NSApplication.didChangeScreenParametersNotification, object: nil)
+    }
+
+    /// A display was added, removed or rearranged: keep every pet (children too) on a screen that exists.
+    @objc private func screensChanged() {
+        func recover(_ w: PetWindow) {
+            w.recoverDisplayLayout()
+            w.childPets.forEach(recover)
+        }
+        pets.forEach(recover)
     }
 
     private func rebuildMenu() {
@@ -261,7 +272,50 @@ final class PetManager: NSObject {
             .joined(separator: "\n")
         alert.informativeText = "by \(d.author)\n\n\(info)"
         alert.accessoryView = appCreditView()
+        alert.addButton(withTitle: "OK")
+        alert.addButton(withTitle: "License…")
         if let icon = sheet?.icon { alert.icon = icon }
+        NSApp.activate(ignoringOtherApps: true)
+        if alert.runModal() == .alertSecondButtonReturn { showLicense() }
+    }
+
+    /// LICENSE is hard-wrapped at ~78 columns; join those lines so the text view can wrap it to its own width.
+    /// Copyright lines (and their indented continuation) keep their line breaks.
+    static func reflow(_ text: String) -> String {
+        let paragraphs = text.replacingOccurrences(of: "\r\n", with: "\n").components(separatedBy: "\n\n")
+        return paragraphs.map { para -> String in
+            let lines = para.split(separator: "\n", omittingEmptySubsequences: true)
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+            if lines.first?.hasPrefix("Copyright") == true { return lines.joined(separator: "\n") }
+            return lines.joined(separator: " ")
+        }
+        .joined(separator: "\n\n")
+    }
+
+    /// Shows the MIT license bundled in the app (build-app.sh copies LICENSE into Contents/Resources).
+    private func showLicense() {
+        let licenseURL = URL(string: "https://github.com/iappyx/DesktopPetMac/blob/main/LICENSE")!
+        guard let url = Bundle.main.url(forResource: "LICENSE", withExtension: nil),
+              let text = try? String(contentsOf: url, encoding: .utf8) else {
+            NSWorkspace.shared.open(licenseURL)          // e.g. `swift run`, where there is no app bundle
+            return
+        }
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 520, height: 300))
+        scroll.hasVerticalScroller = true
+        scroll.borderType = .bezelBorder
+        let view = NSTextView(frame: scroll.contentView.bounds)
+        view.string = Self.reflow(text)
+        view.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
+        view.isEditable = false
+        view.autoresizingMask = [.width]
+        view.textContainerInset = NSSize(width: 4, height: 4)
+        scroll.documentView = view
+
+        let alert = NSAlert()
+        alert.messageText = "License"
+        alert.window.initialFirstResponder = nil
+        alert.informativeText = "Desktop Pet for macOS is licensed under the MIT License."
+        alert.accessoryView = scroll
         NSApp.activate(ignoringOtherApps: true)
         alert.runModal()
     }
@@ -271,7 +325,10 @@ final class PetManager: NSObject {
         let width: CGFloat = 260
         let text = NSMutableAttributedString(
             string: "Desktop Pet for macOS\ngithub.com/iappyx/DesktopPetMac\n\n"
-                + "Unofficial port of Adriano Petrucci's desktopPet.",
+                + "Port of Adriano Petrucci's desktopPet.\n\n"
+                + "MIT License\n"
+                + "© Adriano Petrucci and the desktopPet contributors\n"
+                + "© 2026 iappyx",
             attributes: [
                 .font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize),
                 .foregroundColor: NSColor.secondaryLabelColor,

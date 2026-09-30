@@ -105,6 +105,25 @@ enum DesktopGeometry {
         return nil
     }
 
+    /// Screen showing most of `rect`, or the closest one when it is on none (e.g. its display was removed).
+    static func nearestScreenIndex(to rect: CGRect) -> Int {
+        let count = NSScreen.screens.count
+        guard count > 1 else { return 0 }
+        var best = 0
+        var bestArea = -1.0
+        for i in 0..<count {
+            let r = bounds(ofScreen: i).intersection(rect)
+            let area = r.isNull ? 0 : Double(r.width * r.height)
+            if area > bestArea { best = i; bestArea = area }
+        }
+        if bestArea > 0 { return best }
+        func distance(_ i: Int) -> Double {
+            let b = bounds(ofScreen: i)
+            return Double(hypot(b.midX - rect.midX, b.midY - rect.midY))
+        }
+        return (0..<count).min { distance($0) < distance($1) } ?? 0
+    }
+
     // MARK: - Other application windows
 
     /// A window of another application the pet may walk on.
@@ -153,9 +172,15 @@ enum DesktopGeometry {
     }
 
     /// Current frame of a window by id, or nil if it is gone / no longer on screen.
+    /// Queries only that window, so it is cheap enough to call many times per second while following it.
     static func frame(ofWindow id: CGWindowID) -> CGRect? {
-        guard id != 0 else { return nil }
-        return otherWindows().first { $0.id == id }?.frame
+        guard id != 0,
+              let list = CGWindowListCopyWindowInfo([.optionIncludingWindow], id) as? [[String: Any]],
+              let info = list.first,
+              (info[kCGWindowIsOnscreen as String] as? Bool) == true,
+              let dict = info[kCGWindowBounds as String] as? NSDictionary,
+              let r = CGRect(dictionaryRepresentation: dict as CFDictionary) else { return nil }
+        return r
     }
 
     /// True if some other window in front of `window` overlaps its top edge around the pet's x position

@@ -1,6 +1,6 @@
 # Desktop Pet for macOS
 
-An unofficial macOS port of [desktopPet](https://github.com/Adrianotiger/desktopPet) by Adriano Petrucci
+A macOS port of [desktopPet](https://github.com/Adrianotiger/desktopPet) by Adriano Petrucci
 (the eSheep revival). The animation engine is translated from the original C# code to Swift; the macOS
 integration (windows, Dock and window detection, menu bar, pet downloads) is new.
 Swift + AppKit, no Xcode project needed.
@@ -8,9 +8,8 @@ Swift + AppKit, no Xcode project needed.
 It reads the **same `animations.xml` pet files** as the Windows version, so every pet
 made for desktopPet (and the online editor) works here unchanged.
 
-This project is not affiliated with or endorsed by the desktopPet project. All credit for the original
-application, the pet format and the pets goes to Adriano Petrucci and the pet authors listed in the
-upstream [`Pets/pets.json`](https://github.com/Adrianotiger/desktopPet/blob/master/Pets/pets.json).
+All credit for the original application, the pet format and the pets goes to Adriano Petrucci and
+the pet authors listed in the upstream [`Pets/pets.json`](https://github.com/Adrianotiger/desktopPet/blob/master/Pets/pets.json).
 
 ## Build & run
 
@@ -64,7 +63,8 @@ Not ported: the pet editor, the Windows-Store/UWP project, auto-update, and the
 
 ## License
 
-Pending — see upstream. The original [desktopPet](https://github.com/Adrianotiger/desktopPet) repository
-has no license file yet; its author has commented on reuse in
-[issue #138](https://github.com/Adrianotiger/desktopPet/issues/138). This section will be updated once
-upstream has a license.
+MIT, see [LICENSE](LICENSE). This port is based on the original
+[desktopPet](https://github.com/Adrianotiger/desktopPet), which is also
+[MIT-licensed](https://github.com/Adrianotiger/desktopPet#license); the attribution to
+Adriano Petrucci and the desktopPet contributors is retained. The pets downloaded at runtime
+belong to their respective authors.

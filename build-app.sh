@@ -10,6 +10,7 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/DesktopPet"
 # Drop the debug symbol table: it embeds absolute build paths (including the macOS user name).
 strip -S "$APP/Contents/MacOS/DesktopPet"
+cp LICENSE "$APP/Contents/Resources/LICENSE"
 # The icon is generated from the upstream pet icon by Resources/make-icon.py (needs Pillow and internet);
 # an earlier generated icon is kept if that fails, otherwise the app is built without one.
 ICON="Resources/DesktopPet.icns"
