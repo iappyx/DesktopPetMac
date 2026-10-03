@@ -45,6 +45,8 @@ final class PetManager: NSObject {
             } else {
                 self.indexFailed = false
                 self.catalog.fetchMissingTitles { [weak self] in self?.rebuildMenu() }
+                self.catalog.fetchMissingIcons { [weak self] in self?.rebuildMenu() }
+                self.catalog.fetchMissingReadmes { [weak self] in self?.rebuildMenu() }
             }
             self.rebuildMenu()
             completion?()
@@ -174,8 +176,10 @@ final class PetManager: NSObject {
             let mi = NSMenuItem(title: catalog.displayName(e.folder), action: #selector(menuSelectPet(_:)), keyEquivalent: "")
             mi.target = self
             mi.representedObject = e.folder
+            if let icon = catalog.icon(e.folder) { mi.image = Self.menuIcon(icon) }
             mi.state = (e.folder == currentPetFolder) ? .on : .off
-            mi.toolTip = "by \(e.author), updated \(e.lastupdate)"
+            mi.toolTip = (catalog.shortDescription(e.folder).map { $0 + "\n" } ?? "")
+                + "by \(e.author), updated \(e.lastupdate)"
                 + (catalog.cachedXML(for: e.folder) == nil ? " (will be downloaded)" : "")
             petsMenu.addItem(mi)
         }
@@ -274,13 +278,112 @@ final class PetManager: NSObject {
             .components(separatedBy: "\n")
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .joined(separator: "\n")
-        alert.informativeText = "by \(d.author)\n\n\(info)"
-        alert.accessoryView = appCreditView()
+        // Catalog pets show their README.md (upstream's "about" text); local files fall back to <info>.
+        if let md = catalog.readme(currentPetFolder) {
+            alert.informativeText = "by \(d.author)"
+            alert.accessoryView = stacked(readmeView(md, folder: currentPetFolder), appCreditView(width: 360))
+        } else {
+            alert.informativeText = "by \(d.author)\n\n\(info)"
+            alert.accessoryView = appCreditView()
+        }
         alert.addButton(withTitle: "OK")
         alert.addButton(withTitle: "License…")
         if let icon = sheet?.icon { alert.icon = icon }
         NSApp.activate(ignoringOtherApps: true)
         if alert.runModal() == .alertSecondButtonReturn { showLicense() }
+    }
+
+    /// Places `top` above `bottom` with a gap, as one accessory view.
+    private func stacked(_ top: NSView, _ bottom: NSView) -> NSView {
+        let gap: CGFloat = 12
+        let width = max(top.frame.width, bottom.frame.width)
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: width,
+                                             height: top.frame.height + gap + bottom.frame.height))
+        bottom.setFrameOrigin(.zero)
+        top.setFrameOrigin(NSPoint(x: 0, y: bottom.frame.height + gap))
+        container.addSubview(top)
+        container.addSubview(bottom)
+        return container
+    }
+
+    /// The pet's README in a scrollable box. Relative links (e.g. "../neko") point into the upstream repo.
+    private func readmeView(_ markdown: String, folder: String) -> NSView {
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 360, height: 190))
+        scroll.hasVerticalScroller = true
+        scroll.borderType = .bezelBorder
+        let view = NSTextView(frame: scroll.contentView.bounds)
+        view.isEditable = false
+        view.drawsBackground = false
+        view.autoresizingMask = [.width]
+        view.textContainerInset = NSSize(width: 6, height: 6)
+        let base = URL(string: "https://github.com/Adrianotiger/desktopPet/tree/master/Pets/\(folder)/")!
+        view.textStorage?.setAttributedString(Self.renderMarkdown(markdown, baseURL: base))
+        scroll.documentView = view
+        return scroll
+    }
+
+    /// Small Markdown renderer for pet READMEs: headings, bullet lists, bold/italic/code and links
+    /// (inline Markdown via AttributedString), plus bare URLs. The first "# Title" is dropped, since the
+    /// dialog already shows the pet's title.
+    static func renderMarkdown(_ markdown: String, baseURL: URL) -> NSAttributedString {
+        let body = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
+        let out = NSMutableAttributedString()
+        var lines = markdown.replacingOccurrences(of: "\r\n", with: "\n").components(separatedBy: "\n")
+        if let first = lines.firstIndex(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty }),
+           lines[first].hasPrefix("# ") {
+            lines.remove(at: first)
+        }
+        var lastWasBlank = true
+        for raw in lines {
+            var line = raw.trimmingCharacters(in: .whitespaces)
+            if line.isEmpty {
+                if !lastWasBlank { out.append(NSAttributedString(string: "\n")) }
+                lastWasBlank = true
+                continue
+            }
+            var font = body
+            if line.hasPrefix("#") {
+                line = line.drop { $0 == "#" }.trimmingCharacters(in: .whitespaces)
+                font = NSFont.boldSystemFont(ofSize: NSFont.systemFontSize)
+                if !lastWasBlank { out.append(NSAttributedString(string: "\n")) }
+            } else if line.hasPrefix("- ") || line.hasPrefix("* ") {
+                line = "•  " + line.dropFirst(2)
+            }
+            let options = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+            let parsed = (try? AttributedString(markdown: line, options: options, baseURL: baseURL))
+                .map { NSMutableAttributedString($0) } ?? NSMutableAttributedString(string: line)
+            let range = NSRange(location: 0, length: parsed.length)
+            parsed.addAttribute(.foregroundColor, value: NSColor.labelColor, range: range)
+            parsed.addAttribute(.font, value: font, range: range)
+            // Bold/italic/code arrive as inline presentation intents, not fonts, so apply them explicitly.
+            if let attributed = try? AttributedString(markdown: line, options: options, baseURL: baseURL) {
+                for run in attributed.runs {
+                    guard let intent = run.inlinePresentationIntent else { continue }
+                    let r = NSRange(run.range, in: attributed)
+                    var f = font
+                    if intent.contains(.stronglyEmphasized) { f = NSFontManager.shared.convert(f, toHaveTrait: .boldFontMask) }
+                    if intent.contains(.emphasized) { f = NSFontManager.shared.convert(f, toHaveTrait: .italicFontMask) }
+                    if intent.contains(.code) { f = NSFont.monospacedSystemFont(ofSize: font.pointSize, weight: .regular) }
+                    parsed.addAttribute(.font, value: f, range: r)
+                }
+            }
+            // Make relative links absolute, and link bare URLs.
+            parsed.enumerateAttribute(.link, in: range) { value, r, _ in
+                if let url = value as? URL { parsed.addAttribute(.link, value: url.absoluteURL, range: r) }
+            }
+            if let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue) {
+                for match in detector.matches(in: parsed.string, range: range) {
+                    if let url = match.url, parsed.attribute(.link, at: match.range.location, effectiveRange: nil) == nil {
+                        parsed.addAttribute(.link, value: url, range: match.range)
+                    }
+                }
+            }
+            out.append(parsed)
+            out.append(NSAttributedString(string: "\n"))
+            lastWasBlank = false
+        }
+        while out.string.hasSuffix("\n") { out.deleteCharacters(in: NSRange(location: out.length - 1, length: 1)) }
+        return out
     }
 
     /// LICENSE is hard-wrapped at ~78 columns; join those lines so the text view can wrap it to its own width.
@@ -324,11 +427,26 @@ final class PetManager: NSObject {
         alert.runModal()
     }
 
+    /// Fits a pet icon into an 18x18 menu image without distorting it (some icons are not square).
+    static func menuIcon(_ icon: NSImage) -> NSImage {
+        let side: CGFloat = 18
+        let scale = min(side / max(icon.size.width, 1), side / max(icon.size.height, 1))
+        let w = icon.size.width * scale, h = icon.size.height * scale
+        return NSImage(size: NSSize(width: side, height: side), flipped: false) { _ in
+            icon.draw(in: NSRect(x: (side - w) / 2, y: (side - h) / 2, width: w, height: h))
+            return true
+        }
+    }
+
+    /// CFBundleShortVersionString from build-app.sh; "dev" when run without an app bundle (swift run).
+    static var appVersion: String {
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev"
+    }
+
     /// The app's own credit, set apart from the pet's info text by a divider.
-    private func appCreditView() -> NSView {
-        let width: CGFloat = 260
+    private func appCreditView(width: CGFloat = 260) -> NSView {
         let text = NSMutableAttributedString(
-            string: "Desktop Pet for macOS\ngithub.com/iappyx/DesktopPetMac\n\n"
+            string: "Desktop Pet for macOS \(Self.appVersion)\ngithub.com/iappyx/DesktopPetMac\n\n"
                 + "Port of Adriano Petrucci's desktopPet.\n\n"
                 + "MIT License\n"
                 + "© Adriano Petrucci and the desktopPet contributors\n"
@@ -338,7 +456,7 @@ final class PetManager: NSObject {
                 .foregroundColor: NSColor.secondaryLabelColor,
             ])
         text.addAttribute(.font, value: NSFont.boldSystemFont(ofSize: NSFont.smallSystemFontSize),
-                          range: NSRange(location: 0, length: "Desktop Pet for macOS".count))
+                          range: NSRange(location: 0, length: "Desktop Pet for macOS \(Self.appVersion)".count))
         let link = (text.string as NSString).range(of: "desktopPet")
         text.addAttribute(.link, value: URL(string: "https://github.com/Adrianotiger/desktopPet")!, range: link)
         let repo = (text.string as NSString).range(of: "github.com/iappyx/DesktopPetMac")

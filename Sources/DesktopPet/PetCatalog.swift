@@ -1,4 +1,4 @@
-import Foundation
+import AppKit
 
 /// Pets are not shipped with the app: like the Windows version, it reads the pet list (pets.json) from the
 /// upstream desktopPet repository and downloads each animations.xml on demand. Downloads are cached in
@@ -37,6 +37,7 @@ final class PetCatalog {
     let cacheRoot: URL
     private(set) var entries: [Entry] = []
     private var titles: [String: CachedTitle] = [:]
+    private var iconCache: [String: NSImage] = [:]
     private let session: URLSession
 
     init() {
@@ -118,6 +119,95 @@ final class PetCatalog {
             self?.saveTitles()
             completion()
         }
+    }
+
+    // MARK: - Icons
+
+    private func iconURL(_ folder: String) -> URL { folderURL(folder).appendingPathComponent("icon.png") }
+
+    /// The pet's icon.png (48x48), if downloaded.
+    func icon(_ folder: String) -> NSImage? {
+        if let img = iconCache[folder] { return img }
+        guard Self.isValidFolder(folder), let img = NSImage(contentsOf: iconURL(folder)) else { return nil }
+        iconCache[folder] = img
+        return img
+    }
+
+    /// Downloads the icon.png files that are missing or outdated (a few KB each, like the upstream
+    /// pet chooser). Completion runs on main.
+    func fetchMissingIcons(completion: @escaping () -> Void) {
+        fetchMissing(file: "icon.png", maxBytes: 256 * 1024, completion: completion) { [weak self] folder, data in
+            guard let img = NSImage(data: data) else { return false }
+            self?.iconCache[folder] = img
+            return true
+        }
+    }
+
+    // MARK: - Descriptions (README.md, the pet's "about" text upstream)
+
+    /// The pet's README.md, if downloaded.
+    func readme(_ folder: String) -> String? {
+        guard Self.isValidFolder(folder) else { return nil }
+        return try? String(contentsOf: folderURL(folder).appendingPathComponent("README.md"), encoding: .utf8)
+    }
+
+    func fetchMissingReadmes(completion: @escaping () -> Void) {
+        fetchMissing(file: "README.md", maxBytes: 64 * 1024, completion: completion) { _, data in
+            String(data: data, encoding: .utf8) != nil
+        }
+    }
+
+    /// First sentence of the README's "Description" section (or of its first paragraph), as plain text.
+    func shortDescription(_ folder: String) -> String? {
+        guard let md = readme(folder) else { return nil }
+        var lines = md.components(separatedBy: .newlines).map { $0.trimmingCharacters(in: .whitespaces) }
+        if let i = lines.firstIndex(where: { $0.lowercased().hasPrefix("## description") }) {
+            lines = Array(lines[(i + 1)...])
+        }
+        let paragraph = lines.drop { $0.isEmpty || $0.hasPrefix("#") }.prefix { !$0.isEmpty && !$0.hasPrefix("#") }
+        var text = Self.plainText(paragraph.joined(separator: " "))
+        // A sentence ends at . ! or ? followed by a capital letter or the end ("Negima! mascots." is one sentence).
+        if let end = text.range(of: #"[.!?](?=\s+[A-Z]|\s*$)"#, options: .regularExpression) {
+            text = String(text[..<end.upperBound]).trimmingCharacters(in: .whitespaces)
+        }
+        guard !text.isEmpty else { return nil }
+        return text.count > 140 ? String(text.prefix(139)) + "…" : text
+    }
+
+    /// Removes Markdown link and emphasis syntax: "[text](url)" -> "text", "**x**" -> "x".
+    static func plainText(_ md: String) -> String {
+        var s = md.replacingOccurrences(of: #"!?\[([^\]]*)\]\([^)]*\)"#, with: "$1", options: .regularExpression)
+        for mark in ["**", "__", "`"] { s = s.replacingOccurrences(of: mark, with: "") }
+        return s.trimmingCharacters(in: .whitespaces)
+    }
+
+    // MARK: - Small per-pet files
+
+    /// Downloads `file` for every pet whose copy is missing or older than its lastupdate in the pet list.
+    /// `accept` validates the data (and may cache it); only accepted files are written. Completion on main.
+    private func fetchMissing(file: String, maxBytes: Int, completion: @escaping () -> Void,
+                              accept: @escaping (String, Data) -> Bool) {
+        let stampName = file + ".lastupdate"
+        let missing = entries.filter { e in
+            let dir = folderURL(e.folder)
+            let stamp = try? String(contentsOf: dir.appendingPathComponent(stampName), encoding: .utf8)
+            return stamp != e.lastupdate || !FileManager.default.fileExists(atPath: dir.appendingPathComponent(file).path)
+        }
+        guard !missing.isEmpty else { completion(); return }
+        let group = DispatchGroup()
+        for e in missing {
+            group.enter()
+            get(Self.baseURL.appendingPathComponent(e.folder).appendingPathComponent(file)) { [weak self] result in
+                defer { group.leave() }
+                guard let self = self, case .success(let data) = result,
+                      data.count <= maxBytes, accept(e.folder, data) else { return }
+                let dir = self.folderURL(e.folder)
+                try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                try? data.write(to: dir.appendingPathComponent(file), options: .atomic)
+                try? e.lastupdate.write(to: dir.appendingPathComponent(stampName), atomically: true, encoding: .utf8)
+            }
+        }
+        group.notify(queue: .main) { completion() }
     }
 
     /// Folder names come from the network and become path components, so allow only plain names.

@@ -26,8 +26,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleName</key><string>DesktopPet</string>
     <key>CFBundleDisplayName</key><string>Desktop Pet</string>
     <key>CFBundleIdentifier</key><string>org.desktoppet.mac</string>
-    <key>CFBundleVersion</key><string>1</string>
-    <key>CFBundleShortVersionString</key><string>0.1</string>
+    <key>CFBundleVersion</key><string>1.5.0</string>
+    <key>CFBundleShortVersionString</key><string>1.5.0</string>
     <key>CFBundleExecutable</key><string>DesktopPet</string>
     <key>CFBundleIconFile</key><string>DesktopPet</string>
     <key>CFBundlePackageType</key><string>APPL</string>
