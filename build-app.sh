@@ -1,9 +1,12 @@
 #!/bin/bash
-# Builds DesktopPet.app (release) next to this script.
+# Builds DesktopPet.app (release, universal: Apple Silicon + Intel) next to this script.
+# VERSION overrides the app version; the release workflow sets it from the git tag (v1.5.0 -> 1.5.0).
 set -euo pipefail
 cd "$(dirname "$0")"
-swift build -c release
-BIN=".build/release/DesktopPet"
+VERSION="${VERSION:-1.5.0}"
+ARCHS=(--arch arm64 --arch x86_64)
+swift build -c release "${ARCHS[@]}"
+BIN="$(swift build -c release "${ARCHS[@]}" --show-bin-path)/DesktopPet"
 APP="DesktopPet.app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
@@ -26,8 +29,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleName</key><string>DesktopPet</string>
     <key>CFBundleDisplayName</key><string>Desktop Pet</string>
     <key>CFBundleIdentifier</key><string>org.desktoppet.mac</string>
-    <key>CFBundleVersion</key><string>1.5.0</string>
-    <key>CFBundleShortVersionString</key><string>1.5.0</string>
+    <key>CFBundleVersion</key><string>${VERSION}</string>
+    <key>CFBundleShortVersionString</key><string>${VERSION}</string>
     <key>CFBundleExecutable</key><string>DesktopPet</string>
     <key>CFBundleIconFile</key><string>DesktopPet</string>
     <key>CFBundlePackageType</key><string>APPL</string>
@@ -39,4 +42,4 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 PLIST
 codesign --force --deep --sign - "$APP" 2>/dev/null || true
 touch "$APP"
-echo "Built $APP"
+echo "Built $APP (version $VERSION)"

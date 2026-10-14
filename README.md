@@ -11,6 +11,19 @@ made for desktopPet (and the online editor) works here unchanged.
 All credit for the original application, the pet format and the pets goes to Adriano Petrucci and
 the pet authors listed in the upstream [`Pets/pets.json`](https://github.com/Adrianotiger/desktopPet/blob/master/Pets/pets.json).
 
+## Download
+
+Ready-built versions for Apple Silicon and Intel Macs (macOS 12 or newer) are on the
+[Releases](https://github.com/iappyx/DesktopPetMac/releases) page. Unzip, move **DesktopPet.app** to
+Applications and open it.
+
+The app is not notarized by Apple, so the first launch is blocked ("Apple could not verify…"). Open it
+once, then go to **System Settings → Privacy & Security** and click **Open Anyway**. After that it opens
+normally.
+
+Releases are built by GitHub Actions (`.github/workflows/release.yml`) whenever a version tag such as
+`v1.5.0` is pushed; the tag sets the app version.
+
 ## Build & run
 
 Requires macOS 12+ and Xcode command line tools (`xcode-select --install`).
@@ -20,7 +33,7 @@ without them the app is built without an icon.
 
 ```bash
 swift run                      # debug build, runs immediately
-./build-app.sh                 # release build -> DesktopPet.app
+./build-app.sh                 # release build (universal) -> DesktopPet.app
 open DesktopPet.app
 ```
 
